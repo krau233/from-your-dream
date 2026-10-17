@@ -4,7 +4,7 @@
 >
 > 更新日期：2026-10-17。
 >
-> 产品方向已确认；本文中的新增技术选型、数据结构和接口属于实施建议。除“仓库现状”所列内容外，各业务模块尚未实现。
+> 产品方向与 Spring AI 选型已确认；其余技术选型、数据结构和接口属于实施建议。除“仓库现状”所列内容外，各业务模块尚未实现。
 
 ## 1. 产品目标与范围
 
@@ -45,9 +45,9 @@ From Your Dream 是一款 AI 驱动的视觉小说 Web 应用。玩家通过对�
 
 上述版本是仓库中的声明，不表示本文已完成构建、依赖兼容性或部署验证。当前 Redis 接口不等同于账号系统；仓库尚未实现本文描述的游戏业务、前端和关系数据库持久化。
 
-### 2.2 建议的技术组合
+### 2.2 技术选型与建议
 
-| 层次 | 建议 | 当前状态与理由 |
+| 层次 | 方案 | 当前状态与理由 |
 | --- | --- | --- |
 | Web 前端 | Vue 3 + TypeScript + Vite | 待确定；适合以组件组织舞台、对话、历史和账号页面 |
 | 前端演出 | HTML / CSS、图片与浏览器音频能力 | 先覆盖背景、立绘、表情、文字和基本转场 |
@@ -57,12 +57,14 @@ From Your Dream 是一款 AI 驱动的视觉小说 Web 应用。玩家通过对�
 | 数据访问 | 关系字段 + 明确 SQL；工具待定 | 核心标识和约束使用关系字段，可变剧情数据按需使用 JSONB |
 | Redis | 保留为可选的缓存或会话基础设施 | 已引入依赖；玩家长期数据以主数据库为准 |
 | 故事内容 | 版本化 JSON 文件 + 素材清单 | 待实现；由作者编辑，发布后形成不可变版本 |
-| 模型接入 | 后端统一模型调用模块 | 提供方待定，先接入一个模型服务 |
+| 模型接入 | Spring AI，以 `ChatClient` 统一调用模型 | 已确定框架；提供方与具体模型待定，先接入一个模型服务 |
 | API | HTTPS + JSON | 第一版按整轮请求返回；流式输出后续按体验需要增加 |
 
 Vue 的官方工具链提供 Vite 和 TypeScript 支持；这里将其作为候选前端方案。[Vue 工具链文档](https://vuejs.org/guide/scaling-up/tooling.html)
 
 PostgreSQL 提供 JSONB 类型，可用于保存部分结构可变的剧情状态；账号归属、版本、顺序和唯一约束仍使用关系字段管理。[PostgreSQL JSON 类型文档](https://www.postgresql.org/docs/current/datatype-json.html)
+
+Spring AI 负责模型接入与响应转换。角色、记忆检索、剧情导演和规则结算由普通 Spring Service 组织。依赖接入时使用 Spring AI BOM 统一版本，并根据最终提供方选择模型模块。[Spring AI 接入文档](https://docs.spring.io/spring-ai/reference/getting-started.html)
 
 ## 3. 总体架构
 
@@ -83,7 +85,7 @@ flowchart TB
         Game --> Director[剧情导演]
         Game --> Ending[终局判定与结局呈现]
         Characters --> Memory[角色认知与记忆检索]
-        Characters --> Model[模型调用模块]
+        Characters --> Model[Spring AI 模型调用模块]
         Director --> Model
         Ending --> Model
         Rules --> Content[故事版本与规则加载]
@@ -361,9 +363,13 @@ sequenceDiagram
 
 ### 12.1 调用职责
 
-同一模型接入模块支持角色生成、局部导演规划、摘要和结局呈现。各任务使用不同上下文与输出格式，先复用同一个提供方。
+已选定 Spring AI 作为模型接入框架，使用 `ChatClient` 支持角色生成、局部导演规划、摘要和结局呈现。各任务使用不同上下文与输出格式，先复用同一个提供方。
 
-提供方适配负责请求发送、超时、错误映射、结构化响应解析和用量记录。模型密钥只在服务端配置。具体 SDK 或 HTTP 接入方式在确定提供方后选择。
+使用 Spring AI 的模型适配与响应转换能力完成请求发送和结构化结果读取，业务层统一管理超时、错误映射、重试预算和用量记录。模型密钥只在服务端配置。具体模型模块、模型名称和参数在确定提供方后选择。[ChatClient 文档](https://docs.spring.io/spring-ai/reference/api/chatclient.html)
+
+每轮由业务层显式组装角色设定、当前状态、已提交的近期对话和检索记忆。生成结果经过校验与事务提交后，才成为后续上下文的正式来源；失败或被否决的候选结果不写入有效记忆。
+
+Spring AI 的 `ChatMemory` 可按需辅助管理短期上下文。完整历史、角色长期记忆、知情范围和存档仍由业务数据库管理；使用框架会话记忆时，由服务端按玩家、周目和角色生成独立标识，并校验数据归属。[ChatMemory 文档](https://docs.spring.io/spring-ai/reference/api/chat-memory.html)
 
 首版只调用本轮参与角色。导演和记忆摘要按事件触发，无需让所有角色在每条台词后运行。
 
