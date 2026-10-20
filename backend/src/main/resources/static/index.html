@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>From Your Dream · 最后一场演出</title>
+  <link rel="stylesheet" href="/style.css?v=scene-engine-1">
+  <script src="/app.js?v=scene-engine-1" defer></script>
+</head>
+<body>
+  <main>
+    <header class="page-header">
+      <div><p class="eyebrow">FROM YOUR DREAM</p><h1>最后一场演出</h1></div>
+      <span class="tag">单人故事 · 演示版</span>
+    </header>
+
+    <section class="account-panel" aria-label="选择账号">
+      <div class="section-label">你的故事身份</div>
+      <div class="account-controls">
+        <label for="account-id" class="sr-only">账号字符串</label>
+        <input id="account-id" maxlength="13" placeholder="输入已有的账号 ID" autocomplete="off">
+        <button id="use-account" class="primary">进入故事</button>
+        <button id="create-account">生成新身份</button>
+        <label for="accounts" class="sr-only">已有账号</label>
+        <select id="accounts"><option value="">选择已有身份</option></select>
+        <button id="refresh-accounts" aria-label="刷新账号列表">刷新</button>
+      </div>
+      <p class="hint">使用生成的字符串区分身份。进度暂存在本次服务运行期间，重启后重新开始。</p>
+    </section>
+
+    <p id="status" class="status" role="status" aria-live="polite">先生成一个身份，或选择已有身份进入故事。</p>
+
+    <section id="game" hidden>
+      <div class="story-toolbar">
+        <span id="progress" class="section-label"></span>
+        <div><button id="history-button">回看对话</button><button id="reset-button">重新开始</button></div>
+      </div>
+
+      <section class="stage" aria-label="故事舞台">
+        <div id="scene-label" class="scene-label"></div>
+        <p id="narration" class="narration"></p>
+        <p id="scene-environment" class="scene-environment" hidden></p>
+        <p id="presence-label" class="section-label"></p>
+        <div id="characters" class="characters" aria-label="在场角色"></div>
+        <p id="player-input" class="player-input" hidden></p>
+        <div id="responses" class="responses" aria-label="在场角色的回应"></div>
+        <article id="story-beat" class="story-beat" aria-label="交谈后的剧情" hidden>
+          <p class="eyebrow">场景旁白</p>
+          <p id="story-narration"></p>
+        </article>
+      </section>
+
+      <section id="ending-panel" class="ending-panel" hidden>
+        <p class="eyebrow">这一夜的尾声</p><h2>属于你的结局</h2><p id="ending-text"></p>
+      </section>
+
+      <form id="chat-form" class="chat-form">
+        <label id="input-label" for="message">你会怎么回应？</label>
+        <div id="opening-responses" class="opening-responses" aria-label="回应眼前的场景" hidden></div>
+        <textarea id="message" rows="3" maxlength="1000" placeholder="也可以自由回应，说出你的想法或想做的事。" required></textarea>
+        <div class="form-footer">
+          <span>你的话会被在场的人听见，他们也可以保持沉默。</span>
+          <div class="chat-actions">
+            <button id="end-conversation" type="button">暂时不说了，继续剧情</button>
+            <button id="send-button" class="primary" type="submit">发送</button>
+          </div>
+        </div>
+      </form>
+
+      <section id="history-panel" class="history-panel" hidden>
+        <div class="history-heading"><h2>已经发生的故事</h2><button id="close-history">收起</button></div>
+        <div id="history-list"></div>
+      </section>
+    </section>
+  </main>
+</body>
+</html>

@@ -7,4 +7,6 @@ public interface RedisService {
     List<String> findUserKeys();
 
     String createUserCode();
+
+    boolean userExists(String code);
 }

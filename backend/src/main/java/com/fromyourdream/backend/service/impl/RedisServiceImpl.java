@@ -49,6 +49,11 @@ public class RedisServiceImpl implements RedisService {
     }
 
     @Override
+    public boolean userExists(String code) {
+        return Boolean.TRUE.equals(redisTemplate.hasKey("user_" + code));
+    }
+
+    @Override
     public List<String> findUserKeys() {
         ScanOptions options = ScanOptions.scanOptions()
                 .match("user*")
