@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>From Your Dream · 最后一场演出</title>
-  <link rel="stylesheet" href="/style.css?v=scene-engine-1">
-  <script src="/app.js?v=scene-engine-1" defer></script>
+  <title>From Your Dream · 剧幕之外</title>
+  <link rel="stylesheet" href="/style.css?v=beyond-screen-1">
+  <script src="/app.js?v=scene-repair-1" defer></script>
 </head>
 <body>
   <main>
     <header class="page-header">
-      <div><p class="eyebrow">FROM YOUR DREAM</p><h1>最后一场演出</h1></div>
+      <div><p class="eyebrow">FROM YOUR DREAM</p><h1 id="story-title">剧幕之外</h1></div>
       <span class="tag">单人故事 · 演示版</span>
     </header>
 
@@ -45,7 +45,7 @@
         <p id="player-input" class="player-input" hidden></p>
         <div id="responses" class="responses" aria-label="在场角色的回应"></div>
         <article id="story-beat" class="story-beat" aria-label="交谈后的剧情" hidden>
-          <p class="eyebrow">场景旁白</p>
+          <p class="eyebrow">剧情演绎</p>
           <p id="story-narration"></p>
         </article>
       </section>
@@ -54,18 +54,24 @@
         <p class="eyebrow">这一夜的尾声</p><h2>属于你的结局</h2><p id="ending-text"></p>
       </section>
 
-      <form id="chat-form" class="chat-form">
-        <label id="input-label" for="message">你会怎么回应？</label>
-        <div id="opening-responses" class="opening-responses" aria-label="回应眼前的场景" hidden></div>
-        <textarea id="message" rows="3" maxlength="1000" placeholder="也可以自由回应，说出你的想法或想做的事。" required></textarea>
-        <div class="form-footer">
-          <span>你的话会被在场的人听见，他们也可以保持沉默。</span>
-          <div class="chat-actions">
-            <button id="end-conversation" type="button">暂时不说了，继续剧情</button>
-            <button id="send-button" class="primary" type="submit">发送</button>
-          </div>
-        </div>
-      </form>
+      <section id="decision-panel" class="decision-panel" aria-labelledby="decision-question">
+        <p class="eyebrow">轮到你决定</p>
+        <h2 id="decision-question"></h2>
+        <div id="decision-choices" class="decision-choices" aria-label="关键选择"></div>
+        <p id="decision-status" class="status"></p>
+        <p class="hint">每个选择都有取舍。作出决定后，人物对白、行动和过渡会连续演绎，直到下一个关键时刻。</p>
+        <details id="custom-decision" class="custom-decision">
+          <summary>我有另一个决定</summary>
+          <form id="chat-form" class="chat-form">
+            <label for="message">在这个分歧上，你准备怎样做？</label>
+            <textarea id="message" rows="3" maxlength="1000" placeholder="写出你的决定，也可以说明你愿意承担的代价。" required></textarea>
+            <div class="form-footer">
+              <span>重要立场由你决定，日常应答由 AI 演绎。</span>
+              <button id="send-button" class="primary" type="submit">作出决定</button>
+            </div>
+          </form>
+        </details>
+      </section>
 
       <section id="history-panel" class="history-panel" hidden>
         <div class="history-heading"><h2>已经发生的故事</h2><button id="close-history">收起</button></div>

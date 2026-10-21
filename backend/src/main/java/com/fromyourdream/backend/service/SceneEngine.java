@@ -7,12 +7,15 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
 
 /** 按作者大纲维护每局当前幕；角色发言和叙事候选通过校验后才能改变场景。 */
 public class SceneEngine {
 
+    private static final Logger log = LoggerFactory.getLogger(SceneEngine.class);
     private final List<Plan> plans;
     private final Map<String, String> names;
     private final int maxTurns;
@@ -70,9 +73,9 @@ public class SceneEngine {
         String participantMemories = current.presentCharacterIds().stream()
                 .map(id -> names.get(id) + "（" + id + "）的独立记忆：" + memories.getOrDefault(id, "尚无额外记忆。"))
                 .collect(Collectors.joining("\n"));
-        var beat = agent.advance(story, context(current)
-                + "\n全局第 " + number + "/" + maxTurns + " 段；本幕第 " + (current.turns() + 1)
-                + "/" + currentPlan.maxTurns() + " 次互动。"
+        String advanceContext = context(current)
+                + "\n全局第 " + number + "/" + maxTurns + " 次关键决定；本幕第 " + (current.turns() + 1)
+                + "/" + currentPlan.maxTurns() + " 次关键决定。日常对白和动作连续演绎，不单独消耗决定次数。"
                 + "\n本幕是否已达到必须收束的时间上限：" + atLimit
                 + "\n玩家是否要求暂时结束交谈并继续剧情：" + endConversation
                 + "\n若本幕继续，targetSceneId 必须为：" + current.id()
@@ -84,27 +87,58 @@ public class SceneEngine {
                         + "\n下一幕可在场角色：" + participants(next.characterIds()))
                 + "\n本幕可在场角色：" + participants(currentPlan.characterIds())
                 + "\n本轮开始时所有在场者的独立记忆：\n" + participantMemories
-                + "\n本幕已经实际发生的事件（包含本轮所有公开回应）：\n" + history);
-        if (beat == null) throw invalid();
+                + "\nmemories 的键必须恰好为：" + current.presentCharacterIds()
+                + "；名单为空时必须返回空对象 {}。本轮结束后才入场的人不放入本轮 memories。"
+                + "\n已经实际发生的事件与关键决定（包含本轮所有公开回应，按见证者区分认知）：\n" + history;
+        var beat = agent.advance(story, advanceContext);
+        for (int attempt = 0; ; attempt++) {
+            String issue = invalidReason(beat, current, next, atLimit);
+            if (issue.isEmpty()) break;
+            log.warn("场景结算校验失败 scene={} attempt={} reason={}", current.id(), attempt + 1, issue);
+            if (attempt == 1) throw invalid();
+            beat = agent.advance(story, advanceContext
+                    + "\n上一版候选未通过校验，尚未保存，也不属于已经发生的历史。保持同一玩家选择，修正以下问题，返回完整结算结果。"
+                    + "\n校验问题：" + issue + "\n上一版候选：\n" + beat);
+        }
         Plan target = beat.sceneEnded() && next != null ? next : currentPlan;
-        if (!target.id().equals(beat.targetSceneId()) || (atLimit && !beat.sceneEnded())
-                || !optionalText(beat.narration(), 1800) || !text(beat.environment(), 1200)
-                || !validParticipants(beat.presentCharacterIds(), new HashSet<>(target.characterIds()))
-                || beat.memories() == null
-                || !beat.memories().keySet().equals(new HashSet<>(current.presentCharacterIds()))
-                || beat.memories().values().stream().anyMatch(value -> !text(value, 1600))) {
-            throw invalid();
-        }
-        if ((beat.sceneEnded() || !new HashSet<>(beat.presentCharacterIds()).equals(new HashSet<>(current.presentCharacterIds())))
-                && beat.narration().isBlank()) {
-            throw invalid();
-        }
         boolean terminal = beat.sceneEnded() && next == null;
         State updated = new State(target.id(), target.title(), beat.environment().trim(),
                 List.copyOf(beat.presentCharacterIds()), target == currentPlan ? current.turns() + 1 : 0, terminal);
         return new Resolution(updated, beat.narration().trim(), beat.sceneEnded(),
                 beat.memories().entrySet().stream().collect(Collectors.toUnmodifiableMap(
                         Map.Entry::getKey, entry -> entry.getValue().trim())));
+    }
+
+    private String invalidReason(CharacterAgent.StoryBeat beat, State current, Plan next, boolean atLimit) {
+        if (beat == null) return "没有返回结算对象。";
+        if (atLimit && !beat.sceneEnded()) {
+            return "本幕已达到上限，sceneEnded 必须为 true，targetSceneId 必须为 "
+                    + (next == null ? current.id() : next.id()) + "。";
+        }
+        Plan target = beat.sceneEnded() && next != null ? next : plan(current.id());
+        if (!target.id().equals(beat.targetSceneId())) {
+            return "targetSceneId 应为 " + target.id() + "，实际为 " + beat.targetSceneId() + "。";
+        }
+        if (!optionalText(beat.narration(), 1800)) return "narration 必须是最多 1800 字的字符串。";
+        if (!text(beat.environment(), 1200)) return "environment 必须是 1 至 1200 字的字符串。";
+        if (!validParticipants(beat.presentCharacterIds(), new HashSet<>(target.characterIds()))) {
+            return "presentCharacterIds 只能从 " + target.characterIds() + " 中选择且不能重复，实际为 "
+                    + beat.presentCharacterIds() + "。";
+        }
+        if (beat.memories() == null
+                || !beat.memories().keySet().equals(new HashSet<>(current.presentCharacterIds()))) {
+            return "memories 的键必须恰好为推进前的 " + current.presentCharacterIds()
+                    + "，实际为 " + (beat.memories() == null ? "null" : beat.memories().keySet())
+                    + "；推进前无人时返回 {}，新入场者不在本轮记忆更新中。";
+        }
+        if (beat.memories().values().stream().anyMatch(value -> !text(value, 1600))) {
+            return "每份角色记忆必须是 1 至 1600 字的字符串。";
+        }
+        if ((beat.sceneEnded() || !new HashSet<>(beat.presentCharacterIds()).equals(new HashSet<>(current.presentCharacterIds())))
+                && beat.narration().isBlank()) {
+            return "转场或参与名单改变时，narration 必须交代实际经过，不能为空。";
+        }
+        return "";
     }
 
     private Plan plan(String id) {
@@ -130,7 +164,8 @@ public class SceneEngine {
     }
 
     private ResponseStatusException invalid() {
-        return new ResponseStatusException(HttpStatus.BAD_GATEWAY, "场景结算返回内容无效，本轮未保存，请重试。");
+        return new ResponseStatusException(HttpStatus.BAD_GATEWAY,
+                "剧情生成未通过场景检查，自动修正仍未成功。本轮未保存，可以重试同一选项。");
     }
 
     public record Plan(String id, String title, String environment, List<String> characterIds,

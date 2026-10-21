@@ -61,7 +61,38 @@ class GameServiceTest {
         when(agent.respond(anyString(), anyString(), anyString()))
                 .thenAnswer(call -> call.getArgument(0, String.class).contains("你叫林澈") ? lin : xu);
         when(agent.advance(anyString(), anyString())).thenReturn(stay("rehearsal"));
-        games = new GameService(accounts, agent);
+        var decision = new CharacterAgent.DecisionPoint(
+                "要为最后一场演出承担哪种责任？", List.of(
+                    new CharacterAgent.Choice("perform", "承担登台责任", "我会登台完成已经选定的方案。", "承担不完美演出的风险。"),
+                    new CharacterAgent.Choice("withdraw", "承担撤下演出的责任", "我会说明撤下曲目的决定。", "放弃最后一次合演的机会。")));
+        when(agent.prepareDecision(anyString(), anyString())).thenReturn(decision);
+        games = new GameService(accounts, agent, fixtureStory(decision));
+    }
+
+    private GameService.Story fixtureStory(CharacterAgent.DecisionPoint decision) {
+        return new GameService.Story("最后一场演出", "音乐教室里，你们正准备最后一次排练。",
+                new GameService.OpeningPrompt("xu-zhi", "最后一遍，一起把歌唱完。", List.of()),
+                "林澈和许栀与你一起准备最后一场演出。", 8,
+                List.of(
+                    new SceneEngine.Plan("rehearsal", "音乐教室", "排练中。", BOTH, "决定结尾方案。", "方案落实或时间用尽。", 3),
+                    new SceneEngine.Plan("backstage", "礼堂侧幕", "候场中。", BOTH, "决定登台安排。", "安排确定或开演时间到。", 3),
+                    new SceneEngine.Plan("performance", "礼堂", "演出时刻。", BOTH, "呈现演出结果。", "主要行动结束。", 2)),
+                List.of(
+                    new GameService.CharacterProfile("lin-che", "林澈", "负责作曲。", "你叫林澈，表达克制，认真看待承诺。"),
+                    new GameService.CharacterProfile("xu-zhi", "许栀", "负责主唱。", "你叫许栀，坦率、独立，有自己的主意。")),
+                decision, "");
+    }
+
+    @Test
+    void shortIdentitySupportsPrefixAndStillRequiresAnExistingValidAccount() {
+        var initial = games.get("yl");
+        assertEquals("yl", initial.userId());
+        assertEquals(initial, games.get("user_yl"));
+        for (String invalid : List.of("", "123456789", "y_l", "../yl")) {
+            assertStatus(400, () -> games.get(invalid));
+        }
+        when(accounts.userExists("missing")).thenReturn(false);
+        assertStatus(404, () -> games.get("missing"));
     }
 
     @Test
@@ -196,7 +227,7 @@ class GameServiceTest {
         assertEquals(next, games.turn("Account1", request));
         assertStatus(409, () -> games.turn("Account1", request(initial, "request-01", "别的内容")));
         assertStatus(409, () -> games.turn("Account1", request(initial, "request-02", "旧页面的输入")));
-        assertStatus(409, () -> games.turn("Account1", new TurnRequest(
+        assertStatus(400, () -> games.turn("Account1", new TurnRequest(
                 initial.gameId(), "request-01", 0, "一起排练吧", true)));
         verify(agent, times(2)).respond(anyString(), anyString(), anyString());
         verify(agent).advance(anyString(), anyString());
@@ -221,6 +252,7 @@ class GameServiceTest {
         when(agent.advance(anyString(), anyString()))
                 .thenThrow(new ResponseStatusException(HttpStatus.BAD_GATEWAY, "叙事者暂不可用"))
                 .thenReturn(beat("rehearsal", false, BOTH, Map.of("lin-che", "漏掉另一位在场者"), ""))
+                .thenReturn(beat("rehearsal", false, BOTH, Map.of("lin-che", "仍漏掉另一位在场者"), ""))
                 .thenReturn(stay("rehearsal"));
         var initial = games.get("Account1");
         var request = request(initial, "request-01", "排练吧");
@@ -232,12 +264,24 @@ class GameServiceTest {
     }
 
     @Test
-    void manualPauseDoesNotAutomaticallyEndTheWholeScene() {
+    void invalidSceneCandidateIsRepairedWithoutRepeatingCharacterResponses() {
+        when(agent.advance(anyString(), anyString()))
+                .thenReturn(beat("rehearsal", false, BOTH, Map.of("lin-che", "漏掉另一位在场者"), ""))
+                .thenReturn(stay("rehearsal"));
         var initial = games.get("Account1");
-        var next = games.turn("Account1", new TurnRequest(initial.gameId(), "request-end", 0, "", true));
-        assertEquals("rehearsal", next.scene().id());
-        assertFalse(next.history().get(0).sceneEnded());
-        verify(agent).advance(anyString(), anyString());
+        assertEquals(1, games.turn("Account1", request(initial, "request-01", "排练吧")).turn());
+        verify(agent, times(2)).respond(anyString(), anyString(), anyString());
+        verify(agent, times(2)).advance(anyString(), anyString());
+        verify(agent).advance(anyString(), contains("校验问题：memories 的键必须恰好为"));
+    }
+
+    @Test
+    void manualPauseCannotDelegateAMajorDecision() {
+        var initial = games.get("Account1");
+        assertStatus(400, () -> games.turn("Account1",
+                new TurnRequest(initial.gameId(), "request-end", 0, "", true)));
+        assertEquals(initial, games.get("Account1"));
+        verifyNoInteractions(agent);
     }
 
     @Test

@@ -6,12 +6,16 @@ let pending = null;
 el('account-id').value = userId;
 
 async function api(path, { method = 'GET', body, account = userId } = {}) {
+  const gameRequest = path.startsWith('/api/game');
+  if (gameRequest && !account.trim()) {
+    throw new Error('请先选择已有身份，或输入账号 ID。');
+  }
+  const url = gameRequest ? `${path}?${new URLSearchParams({ userId: account.trim() })}` : path;
   const headers = {};
-  if (account) headers['X-User-Id'] = account;
   if (body) headers['Content-Type'] = 'application/json';
   let response;
   try {
-    response = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    response = await fetch(url, { method, headers, cache: 'no-store', body: body ? JSON.stringify(body) : undefined });
   } catch {
     throw new Error('连接中断。重试相同输入时会复用本轮请求，也可以刷新查看已保存的进度。');
   }
@@ -25,8 +29,10 @@ async function api(path, { method = 'GET', body, account = userId } = {}) {
 }
 
 function status(message, error = false) {
-  el('status').textContent = message;
-  el('status').classList.toggle('error', error);
+  for (const id of ['status', 'decision-status']) {
+    el(id).textContent = message;
+    el(id).classList.toggle('error', error);
+  }
 }
 
 async function run(message, action) {
@@ -64,12 +70,13 @@ function render() {
   document.querySelectorAll('button, input, select, textarea').forEach(node => { node.disabled = busy; });
   el('game').hidden = !game;
   if (!game) return;
-  el('progress').textContent = `身份 ${game.userId} · 已互动 ${game.turn} / 最多 ${game.maxTurns} 段`;
+  el('story-title').textContent = game.title;
+  document.title = `From Your Dream · ${game.title}`;
+  el('progress').textContent = `身份 ${game.userId} · 已作出 ${game.turn} 次决定 / 最多 ${game.maxTurns} 次`;
   const last = game.history.at(-1);
   const opening = !last ? game.openingPrompt : null;
   const present = game.characters.filter(character => game.scene.presentCharacterIds.includes(character.id));
-  el('input-label').textContent = '你想说些什么，或做些什么？';
-  el('presence-label').textContent = present.length ? '此刻在场' : '此刻这里只有你';
+  el('presence-label').textContent = present.length ? '当前可互动角色' : '此刻只能由你行动';
   el('characters').replaceChildren(...present.map(character => {
     const card = document.createElement('article');
     card.className = 'character';
@@ -77,33 +84,33 @@ function render() {
     return card;
   }));
   el('scene-label').textContent = game.scene.title;
-  el('end-conversation').hidden = !last;
   el('narration').hidden = Boolean(last);
   el('narration').textContent = game.opening;
   el('scene-environment').hidden = !last;
   el('scene-environment').textContent = game.scene.environment;
   el('player-input').hidden = !last;
-  el('player-input').textContent = last ? `你：${last.playerInput}` : '';
+  el('player-input').textContent = last ? `你的决定：${last.selectedChoice?.label || last.playerInput}` : '';
   const responses = last ? last.responses : opening ? [{
     characterName: game.characters.find(character => character.id === opening.characterId).name,
     narration: '', dialogue: opening.dialogue, emotion: 'calm'
   }] : [];
   el('responses').replaceChildren(...responses.map(responseCard));
   if (!responses.length) el('responses').append(text('p', '一时没有人接话。', 'narration'));
-  el('opening-responses').hidden = !opening?.suggestedReplies?.length;
-  el('opening-responses').replaceChildren(...(opening?.suggestedReplies || []).map(reply => {
-    const button = text('button', reply);
+  el('decision-panel').hidden = game.ended;
+  el('decision-question').textContent = game.decision?.question || '';
+  el('decision-choices').replaceChildren(...(game.decision?.choices || []).map(choice => {
+    const button = document.createElement('button');
     button.type = 'button';
     button.disabled = busy;
-    button.addEventListener('click', () => submitTurn(reply));
+    button.append(text('strong', choice.label, 'choice-label'), text('span', choice.stakes, 'choice-stakes'));
+    button.addEventListener('click', () => submitTurn('', choice.id));
     return button;
   }));
   el('story-beat').hidden = !last?.storyNarration;
   el('story-narration').textContent = last?.storyNarration || '';
   el('ending-panel').hidden = !game.ended;
   el('ending-text').textContent = game.ending;
-  el('chat-form').hidden = game.ended;
-  el('send-button').textContent = busy ? '正在演绎…' : !last ? '回应' : '发送';
+  el('send-button').textContent = busy ? '正在演绎…' : '作出决定';
 }
 
 function emotion(value) {
@@ -113,25 +120,34 @@ function emotion(value) {
 async function refreshAccounts() {
   const keys = await api('/api/redis/user-keys', { account: '' });
   el('accounts').replaceChildren(new Option('选择已有身份', ''), ...keys
-    .filter(key => /^user_[A-Za-z0-9]{8}$/.test(key))
+    .filter(key => /^user_[A-Za-z0-9]{1,8}$/.test(key))
     .sort().map(key => new Option(key.slice(5), key.slice(5))));
 }
 
 async function enter(account) {
-  const next = await api('/api/game', { account: account.trim() });
+  const code = account.trim();
+  if (!code) throw new Error('请先选择已有身份，或输入账号 ID。');
+  el('account-id').value = code;
+  const next = await api('/api/game', { account: code });
   game = next;
   userId = next.userId;
   pending = null;
   el('account-id').value = userId;
   el('message').value = '';
+  el('custom-decision').open = false;
   el('history-panel').hidden = true;
   localStorage.setItem('dream.userId', userId);
   status(`已进入身份 ${userId} 的故事。`);
 }
 
-el('use-account').addEventListener('click', () => run('正在读取故事…', () => enter(el('account-id').value)));
+el('use-account').addEventListener('click', () => run('正在读取故事…',
+  () => enter(el('account-id').value.trim() || el('accounts').value)));
 el('accounts').addEventListener('change', event => {
-  if (event.target.value) run('正在切换身份…', () => enter(event.target.value));
+  const account = event.target.value;
+  if (account) {
+    el('account-id').value = account;
+    run('正在切换身份…', () => enter(account));
+  }
 });
 el('refresh-accounts').addEventListener('click', () => run('正在读取身份…', async () => {
   await refreshAccounts();
@@ -145,20 +161,23 @@ el('create-account').addEventListener('click', () => run('正在生成身份…'
   await refreshAccounts();
 }));
 
-function submitTurn(message, endConversation = false) {
-  if (!game || (!message && !endConversation) || busy || game.ended) return;
+function submitTurn(message, choiceId = '') {
+  if (!game || (!message && !choiceId) || busy || game.ended) return;
   if (!pending || pending.gameId !== game.gameId
-      || pending.message !== message || pending.endConversation !== endConversation) {
-    pending = { gameId: game.gameId, requestId: crypto.randomUUID(), expectedTurn: game.turn,
-      message, endConversation };
+      || pending.message !== message || pending.choiceId !== choiceId) {
+    const requestId = Array.from(crypto.getRandomValues(new Uint8Array(16)),
+      byte => byte.toString(16).padStart(2, '0')).join('');
+    pending = { gameId: game.gameId, requestId, expectedTurn: game.turn,
+      message, choiceId };
   }
-  run('正在演绎对话与剧情，请稍候…', async () => {
+  run('正在演绎你的决定及其后果，请稍候…', async () => {
     try {
       game = await api('/api/game/turns', { method: 'POST', body: pending });
       pending = null;
       el('message').value = '';
+      el('custom-decision').open = false;
       el('history-panel').hidden = true;
-      status(game.ended ? '这一夜已经落幕，你可以回看故事或重新开始。' : '这段经历已保存。');
+      status(game.ended ? '这一夜已经落幕，你可以回看故事或重新开始。' : '这一段演绎已保存，新的关键选择已出现。');
     } catch (error) {
       if (error.status === 409) {
         game = await api('/api/game');
@@ -173,12 +192,12 @@ el('chat-form').addEventListener('submit', event => {
   event.preventDefault();
   submitTurn(el('message').value.trim());
 });
-el('end-conversation').addEventListener('click', () => submitTurn('', true));
 
 el('reset-button').addEventListener('click', () => run('正在重新开始…', async () => {
   game = await api('/api/game/reset', { method: 'POST', body: { gameId: game.gameId } });
   pending = null;
   el('message').value = '';
+  el('custom-decision').open = false;
   el('history-panel').hidden = true;
   status('新的一局开始了。');
 }));
@@ -196,8 +215,11 @@ el('history-button').addEventListener('click', () => run('正在读取历史…'
     const article = document.createElement('article');
     article.className = 'history-turn';
     const witnesses = turn.witnessIds.map(id => game.characters.find(character => character.id === id).name);
-    article.append(text('p', `第 ${turn.number} 段 · ${witnesses.length ? '在场：' + witnesses.join('、') : '独处'}`, 'history-label'),
-      text('p', `你：${turn.playerInput}`));
+    article.append(text('p', `第 ${turn.number} 次决定 · ${witnesses.length ? '在场：' + witnesses.join('、') : '独处'}`, 'history-label'),
+      text('p', turn.decisionQuestion, 'history-narration'));
+    if (turn.selectedChoice) article.append(text('p', `你选择：${turn.selectedChoice.label}`),
+      text('p', `取舍：${turn.selectedChoice.stakes}`, 'history-narration'));
+    article.append(text('p', `你的决定：${turn.playerInput}`));
     turn.responses.forEach(response => {
       if (response.narration) article.append(text('p', response.narration, 'history-narration'));
       if (response.dialogue) article.append(text('p', `${response.characterName}：${response.dialogue}`));

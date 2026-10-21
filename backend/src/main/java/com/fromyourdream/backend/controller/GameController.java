@@ -8,14 +8,15 @@ import com.fromyourdream.backend.service.GameService.GameView;
 import com.fromyourdream.backend.service.GameService.Turn;
 import com.fromyourdream.backend.service.GameService.TurnRequest;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.converter.HttpMessageNotReadableException;
-import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -30,23 +31,40 @@ public class GameController {
     }
 
     @GetMapping
-    public Result<GameView> get(@RequestHeader("X-User-Id") String userId) {
-        return Result.success(games.get(userId));
+    public Result<GameView> get(@RequestParam(value = "userId", required = false) String userId,
+                              @RequestHeader(value = "X-User-Id", required = false) String headerUserId) {
+        return Result.success(games.get(account(userId, headerUserId)));
     }
 
     @GetMapping("/history")
-    public Result<List<Turn>> history(@RequestHeader("X-User-Id") String userId) {
-        return Result.success(games.history(userId));
+    public Result<List<Turn>> history(@RequestParam(value = "userId", required = false) String userId,
+                                     @RequestHeader(value = "X-User-Id", required = false) String headerUserId) {
+        return Result.success(games.history(account(userId, headerUserId)));
     }
 
     @PostMapping("/turns")
-    public Result<GameView> turn(@RequestHeader("X-User-Id") String userId, @RequestBody TurnRequest request) {
-        return Result.success(games.turn(userId, request));
+    public Result<GameView> turn(@RequestParam(value = "userId", required = false) String userId,
+                                @RequestHeader(value = "X-User-Id", required = false) String headerUserId,
+                                @RequestBody TurnRequest request) {
+        return Result.success(games.turn(account(userId, headerUserId), request));
     }
 
     @PostMapping("/reset")
-    public Result<GameView> reset(@RequestHeader("X-User-Id") String userId, @RequestBody ResetRequest request) {
-        return Result.success(games.reset(userId, request.gameId()));
+    public Result<GameView> reset(@RequestParam(value = "userId", required = false) String userId,
+                                 @RequestHeader(value = "X-User-Id", required = false) String headerUserId,
+                                 @RequestBody ResetRequest request) {
+        return Result.success(games.reset(account(userId, headerUserId), request.gameId()));
+    }
+
+    private String account(String userId, String headerUserId) {
+        if (userId != null && headerUserId != null && !userId.equals(headerUserId)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "请求中的账号 ID 不一致，请刷新页面后重试。");
+        }
+        String code = userId != null ? userId : headerUserId;
+        if (code == null || code.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "未收到账号 ID，请重新选择身份后进入故事。");
+        }
+        return code;
     }
 
     @ExceptionHandler(ResponseStatusException.class)
@@ -55,9 +73,9 @@ public class GameController {
                 .body(Result.error(exception.getStatusCode().value(), exception.getReason()));
     }
 
-    @ExceptionHandler({MissingRequestHeaderException.class, HttpMessageNotReadableException.class})
-    public ResponseEntity<Result<Void>> invalidRequest(Exception exception) {
-        return ResponseEntity.badRequest().body(Result.error(400, "请提供账号 ID 和正确的 JSON 请求内容。"));
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<Result<Void>> invalidRequest(HttpMessageNotReadableException exception) {
+        return ResponseEntity.badRequest().body(Result.error(400, "请求内容格式错误，请刷新页面后重试。"));
     }
 
     public record ResetRequest(String gameId) {}
