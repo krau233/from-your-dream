@@ -49,11 +49,11 @@ public class GameService {
         this.accounts = accounts;
         this.agent = agent;
         this.story = story;
-        if (story.maxTurns() < 1 || story.maxTurns() > 20 || story.characters() == null || story.characters().isEmpty()) {
-            throw new IllegalStateException("示例故事需要 1 至 20 段互动及至少一个角色");
+        if (story.characters() == null || story.characters().isEmpty()) {
+            throw new IllegalStateException("故事需要角色设定与初始剧情大纲");
         }
-        scenes = new SceneEngine(story.scenes(), story.characters().stream().collect(
-                Collectors.toMap(CharacterProfile::id, CharacterProfile::name)), story.maxTurns(), agent);
+        scenes = new SceneEngine(story.outline(), story.characters().stream().collect(
+                Collectors.toMap(CharacterProfile::id, CharacterProfile::name)), agent);
         OpeningPrompt opening = story.openingPrompt();
         if (!text(story.opening(), 2000) || opening == null
                 || !scenes.initialState().presentCharacterIds().contains(opening.characterId())
@@ -119,7 +119,7 @@ public class GameService {
             for (String id : witnesses) perceptions.put(id, context(current, character(id), number));
             String candidateContext = witnesses.stream().map(id -> character(id).personality()
                     + "\n该角色可知的经历：\n" + perceptions.get(id)).collect(Collectors.joining("\n\n"));
-            for (String id : scenes.responders(current.scene(), candidateContext, input)) {
+            for (String id : scenes.responders(current.scene(), current.outline(), candidateContext, input)) {
                 CharacterProfile character = character(id);
                 String context = perceptions.get(id)
                         + "\n本轮玩家发言后，在你之前已经发生的公开回应：\n"
@@ -138,26 +138,31 @@ public class GameService {
                     current.decision().question(), selected);
             turns.add(turn);
             String sceneHistory = openingTranscript() + "\n\n" + transcript(turns);
-            var resolution = scenes.resolve(storyBoundary(), current.scene(), number, sceneHistory,
-                    memories, false);
+            var resolution = scenes.resolve(storyBoundary(), current.scene(), current.outline(), current.revisions(),
+                    number, sceneHistory, memories);
             memories.putAll(resolution.memories());
             turns.set(turns.size() - 1, new Turn(number, request.requestId(), input, current.scene().id(), witnesses,
-                    List.copyOf(responses), resolution.narration(), resolution.sceneEnded(), resolution.scene().id(),
+                    List.copyOf(responses), resolution.narration(), resolution.milestoneEnded(), resolution.scene().id(),
                     false, turn.createdAt(), current.decision().question(), selected));
+            var revisions = new ArrayList<>(current.revisions());
+            if (resolution.revision() != null) revisions.add(resolution.revision());
             String ending = "";
             DecisionPoint decision = null;
             if (resolution.scene().ended()) {
-                ending = agent.conclude(storyBoundary(), openingTranscript() + "\n\n" + transcript(turns));
+                ending = agent.conclude(storyBoundary(), scenes.outlineContext(resolution.outline())
+                        + "\n按实际终局修订的结果：" + resolution.revision().outcome()
+                        + "\n实际代价与遗留问题：" + resolution.revision().impact()
+                        + "\n已经发生的完整历史：\n" + openingTranscript() + "\n\n" + transcript(turns));
                 if (!text(ending, 6000)) throw error(HttpStatus.BAD_GATEWAY, "结局内容无效，本轮未保存。");
                 ending = ending.trim();
             } else {
-                decision = validateDecision(agent.prepareDecision(storyBoundary(), scenes.context(resolution.scene())
+                decision = validateDecision(agent.prepareDecision(storyBoundary(), scenes.context(resolution.scene(), resolution.outline())
                         + "\n已经发生的完整经历与决定（不可重置或换个措辞重复询问）：\n"
                         + openingTranscript() + "\n\n" + transcript(turns)));
             }
-            // 演出、下一组关键选项或结局全部成功后，才一起提交新快照。
+            // 演出、幕末大纲修订、下一组关键选项或结局全部成功后，才一起提交。
             slot.snapshot = new Snapshot(current.gameId(), List.copyOf(turns), Map.copyOf(memories),
-                    resolution.scene(), ending, decision);
+                    resolution.scene(), ending, decision, resolution.outline(), List.copyOf(revisions));
             return view(code, slot.snapshot);
         } finally {
             slot.lock.unlock();
@@ -170,7 +175,7 @@ public class GameService {
         acquire(slot);
         try {
             requireGame(slot.snapshot, gameId);
-            slot.snapshot = Snapshot.empty(scenes.initialState(), openingDecision);
+            slot.snapshot = Snapshot.empty(scenes.initialState(), openingDecision, scenes.initialOutline());
             return view(code, slot.snapshot);
         } finally {
             slot.lock.unlock();
@@ -183,7 +188,7 @@ public class GameService {
         return "故事：" + story.premise()
                 + (scenes.initialState().presentCharacterIds().contains(character.id())
                     ? "\n你在开场时在场，亲历的公开事件：\n" + openingTranscript() : "")
-                + "\n当前是第 " + number + "/" + story.maxTurns() + " 段互动。\n" + scenes.context(snapshot.scene())
+                + "\n当前是第 " + number + " 次关键决定。\n" + scenes.context(snapshot.scene(), snapshot.outline())
                 + "\n眼前需要玩家作出关键决定的问题：" + snapshot.decision().question()
                 + "\n按故事规定的渠道接收信息。同场公开发言可被在场者听见；跨屏幕、电话或门两侧，只能知道实际通过该渠道传来的内容。"
                 + "\n记录同时描述了玩家其他地方的行动，不代表你亲眼看见或已被告知。大纲目标与结束条件是作者计划，不是你已经知道的事实。"
@@ -231,7 +236,7 @@ public class GameService {
         OpeningPrompt opening = story.openingPrompt();
         return new GameView(code, snapshot.gameId(), story.title(), story.opening(), new OpeningPrompt(
                 opening.characterId(), opening.dialogue(), openingDecision.choices().stream().map(Choice::action).toList()),
-                snapshot.turns().size(), story.maxTurns(), !snapshot.ending().isEmpty(), snapshot.ending(),
+                snapshot.turns().size(), snapshot.revisions().size(), !snapshot.ending().isEmpty(), snapshot.ending(),
                 story.characters().stream().map(item -> new CharacterView(item.id(), item.name(), item.intro())).toList(),
                 snapshot.scene(), snapshot.turns(), snapshot.decision());
     }
@@ -273,7 +278,7 @@ public class GameService {
     }
 
     private Slot slot(String code) {
-        return games.computeIfAbsent(code, ignored -> new Slot(scenes.initialState(), openingDecision));
+        return games.computeIfAbsent(code, ignored -> new Slot(scenes.initialState(), openingDecision, scenes.initialOutline()));
     }
 
     private void acquire(Slot slot) {
@@ -303,13 +308,16 @@ public class GameService {
     private static class Slot {
         final ReentrantLock lock = new ReentrantLock();
         volatile Snapshot snapshot;
-        Slot(SceneEngine.State scene, DecisionPoint decision) { snapshot = Snapshot.empty(scene, decision); }
+        Slot(SceneEngine.State scene, DecisionPoint decision, SceneEngine.Outline outline) {
+            snapshot = Snapshot.empty(scene, decision, outline);
+        }
     }
 
     private record Snapshot(String gameId, List<Turn> turns, Map<String, String> memories,
-                            SceneEngine.State scene, String ending, DecisionPoint decision) {
-        static Snapshot empty(SceneEngine.State scene, DecisionPoint decision) {
-            return new Snapshot(UUID.randomUUID().toString(), List.of(), Map.of(), scene, "", decision);
+                            SceneEngine.State scene, String ending, DecisionPoint decision,
+                            SceneEngine.Outline outline, List<SceneEngine.Revision> revisions) {
+        static Snapshot empty(SceneEngine.State scene, DecisionPoint decision, SceneEngine.Outline outline) {
+            return new Snapshot(UUID.randomUUID().toString(), List.of(), Map.of(), scene, "", decision, outline, List.of());
         }
     }
 
@@ -333,10 +341,10 @@ public class GameService {
     public record OpeningPrompt(String characterId, String dialogue, List<String> suggestedReplies) {}
     public record CharacterView(String id, String name, String intro) {}
     public record GameView(String userId, String gameId, String title, String opening, OpeningPrompt openingPrompt,
-                           int turn, int maxTurns, boolean ended, String ending, List<CharacterView> characters,
+                           int turn, int completedMilestones, boolean ended, String ending, List<CharacterView> characters,
                            SceneEngine.State scene, List<Turn> history, DecisionPoint decision) {}
     public record CharacterProfile(String id, String name, String intro, String personality) {}
-    public record Story(String title, String opening, OpeningPrompt openingPrompt, String premise, int maxTurns,
-                        List<SceneEngine.Plan> scenes, List<CharacterProfile> characters,
+    public record Story(String title, String opening, OpeningPrompt openingPrompt, String premise, SceneEngine.Outline outline,
+                        List<CharacterProfile> characters,
                         DecisionPoint openingDecision, String directorNotes) {}
 }

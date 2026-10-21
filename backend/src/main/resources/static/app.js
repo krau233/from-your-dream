@@ -72,7 +72,7 @@ function render() {
   if (!game) return;
   el('story-title').textContent = game.title;
   document.title = `From Your Dream · ${game.title}`;
-  el('progress').textContent = `身份 ${game.userId} · 已作出 ${game.turn} 次决定 / 最多 ${game.maxTurns} 次`;
+  el('progress').textContent = `身份 ${game.userId} · 已作出 ${game.turn} 次决定 · 已完成 ${game.completedMilestones} 个里程碑`;
   const last = game.history.at(-1);
   const opening = !last ? game.openingPrompt : null;
   const present = game.characters.filter(character => game.scene.presentCharacterIds.includes(character.id));

@@ -12,51 +12,57 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
 
-/** 按作者大纲维护每局当前幕；角色发言和叙事候选通过校验后才能改变场景。 */
+/** 每局维护可修订的大纲；一幕按剧情里程碑结束，可以包含多次关键决定。 */
 public class SceneEngine {
 
     private static final Logger log = LoggerFactory.getLogger(SceneEngine.class);
-    private final List<Plan> plans;
+    private final Outline initialOutline;
     private final Map<String, String> names;
-    private final int maxTurns;
+    private final Set<String> allowedActors;
     private final CharacterAgent agent;
 
-    public SceneEngine(List<Plan> plans, Map<String, String> names, int maxTurns, CharacterAgent agent) {
+    public SceneEngine(Outline initialOutline, Map<String, String> names, CharacterAgent agent) {
         this.names = Map.copyOf(names);
-        this.maxTurns = maxTurns;
         this.agent = agent;
-        if (plans == null || plans.isEmpty() || plans.stream().anyMatch(plan -> plan == null
-                || !text(plan.id(), 64) || !text(plan.title(), 100) || !text(plan.environment(), 1200)
-                || !text(plan.goal(), 1000) || !text(plan.exitCondition(), 1000)
-                || plan.maxTurns() < 1 || plan.maxTurns() > maxTurns
-                || !validParticipants(plan.characterIds(), names.keySet()))) {
-            throw new IllegalStateException("剧情大纲需要有效的场景、环境、参与角色、目标、结束条件和互动预算");
-        }
-        if (plans.stream().map(Plan::id).distinct().count() != plans.size()
-                || plans.stream().mapToInt(Plan::maxTurns).sum() > maxTurns) {
-            throw new IllegalStateException("场景 ID 不能重复，场景互动预算总和不能超过故事上限");
-        }
-        this.plans = List.copyOf(plans);
+        String issue = outlineIssue(initialOutline, names.keySet(), Set.of(), List.of(), false);
+        if (!issue.isEmpty()) throw new IllegalStateException("初始大纲无效：" + issue);
+        this.initialOutline = copy(initialOutline);
+        this.allowedActors = initialOutline.milestones().stream().flatMap(plan -> plan.characterIds().stream())
+                .collect(Collectors.toUnmodifiableSet());
+    }
+
+    public Outline initialOutline() {
+        return initialOutline;
     }
 
     public State initialState() {
-        Plan first = plans.get(0);
-        return new State(first.id(), first.title(), first.environment(), List.copyOf(first.characterIds()), 0, false);
+        Plan first = initialOutline.milestones().get(0);
+        return new State(first.id(), first.title(), first.environment(), first.characterIds(), 0, false);
     }
 
-    public String context(State state) {
-        Plan plan = plan(state.id());
-        return "当前幕：" + state.id() + " / " + state.title()
-                + "\n当前环境：" + state.environment()
-                + "\n当前在场角色：" + participants(state.presentCharacterIds())
+    public String context(State state, Outline outline) {
+        Plan plan = currentPlan(state, outline);
+        return "当前剧情里程碑：" + state.id() + " / " + state.title()
+                + "\n当前实际环境：" + state.environment()
+                + "\n当前可参与互动的角色：" + participants(state.presentCharacterIds())
                 + "\n本幕关注的问题：" + plan.goal()
-                + "\n本幕结束条件：" + plan.exitCondition();
+                + "\n本幕里程碑结束条件：" + plan.exitCondition()
+                + "\n本幕已作出 " + state.turns() + " 次关键决定。次数只作记录，不构成结束条件。";
     }
 
-    public List<String> responders(State current, String perceptions, String input) {
+    public String outlineContext(Outline outline) {
+        return "后续发展预案（不是已经发生的事实）：" + outline.development()
+                + "\n当前预计结局方向（可以随实际结果修订）：" + outline.endingDirection()
+                + "\n待处理里程碑：\n" + outline.milestones().stream().map(plan ->
+                    plan.id() + " / " + plan.title() + "\n预计环境：" + plan.environment()
+                    + "\n可参与角色：" + participants(plan.characterIds()) + "\n发展目标：" + plan.goal()
+                    + "\n结束条件：" + plan.exitCondition()).collect(Collectors.joining("\n\n"));
+    }
+
+    public List<String> responders(State current, Outline outline, String perceptions, String input) {
         if (current.presentCharacterIds().isEmpty()) return List.of();
-        var responsePlan = agent.planResponses(current.presentCharacterIds(), context(current)
-                + "\n各在场角色的设定和各自可知的经历：\n" + perceptions, input);
+        var responsePlan = agent.planResponses(current.presentCharacterIds(), context(current, outline)
+                + "\n各角色的设定和各自可知的经历：\n" + perceptions, input);
         if (responsePlan == null || !validParticipants(responsePlan.speakerIds(),
                 new HashSet<>(current.presentCharacterIds()))) {
             throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "场景回应名单无效，本轮未保存，请重试。");
@@ -64,89 +70,141 @@ public class SceneEngine {
         return List.copyOf(responsePlan.speakerIds());
     }
 
-    public Resolution resolve(String story, State current, int number, String history,
-                              Map<String, String> memories, boolean endConversation) {
-        Plan currentPlan = plan(current.id());
-        int index = plans.indexOf(currentPlan);
-        Plan next = index + 1 < plans.size() ? plans.get(index + 1) : null;
-        boolean atLimit = current.turns() + 1 >= currentPlan.maxTurns();
+    public Resolution resolve(String story, State current, Outline outline, List<Revision> revisions,
+                              int number, String history, Map<String, String> memories) {
+        Plan currentPlan = currentPlan(current, outline);
         String participantMemories = current.presentCharacterIds().stream()
                 .map(id -> names.get(id) + "（" + id + "）的独立记忆：" + memories.getOrDefault(id, "尚无额外记忆。"))
                 .collect(Collectors.joining("\n"));
-        String advanceContext = context(current)
-                + "\n全局第 " + number + "/" + maxTurns + " 次关键决定；本幕第 " + (current.turns() + 1)
-                + "/" + currentPlan.maxTurns() + " 次关键决定。日常对白和动作连续演绎，不单独消耗决定次数。"
-                + "\n本幕是否已达到必须收束的时间上限：" + atLimit
-                + "\n玩家是否要求暂时结束交谈并继续剧情：" + endConversation
-                + "\n若本幕继续，targetSceneId 必须为：" + current.id()
-                + (next == null
-                    ? "\n这是最后一幕；若本幕结束，targetSceneId 仍为 " + current.id() + "，随后会单独生成结局。"
-                    : "\n若本幕结束，必须按大纲进入：" + next.id() + " / " + next.title()
-                        + "\n下一幕环境基线：" + next.environment()
-                        + "\n下一幕要处理：" + next.goal()
-                        + "\n下一幕可在场角色：" + participants(next.characterIds()))
-                + "\n本幕可在场角色：" + participants(currentPlan.characterIds())
-                + "\n本轮开始时所有在场者的独立记忆：\n" + participantMemories
+        String advanceContext = context(current, outline)
+                + "\n这是全局第 " + number + " 次关键决定。没有按选择次数强制转幕或结束全局的规则。"
+                + "\n只结算当前幕的实际进展。未达到里程碑时继续本幕；里程碑结束后另由导演修订大纲，不在本轮预演下一幕。"
+                + "\n本幕可参与角色：" + participants(currentPlan.characterIds())
+                + "\n本轮开始时所有参与者的独立记忆：\n" + participantMemories
                 + "\nmemories 的键必须恰好为：" + current.presentCharacterIds()
-                + "；名单为空时必须返回空对象 {}。本轮结束后才入场的人不放入本轮 memories。"
-                + "\n已经实际发生的事件与关键决定（包含本轮所有公开回应，按见证者区分认知）：\n" + history;
+                + "；名单为空时返回 {}，本轮结束后才入场者不放入本轮 memories。"
+                + "\n导演当前预案：\n" + outlineContext(outline)
+                + "\n已经实际发生的事件与关键决定：\n" + history;
         var beat = agent.advance(story, advanceContext);
         for (int attempt = 0; ; attempt++) {
-            String issue = invalidReason(beat, current, next, atLimit);
+            String issue = beatIssue(beat, current, currentPlan);
             if (issue.isEmpty()) break;
-            log.warn("场景结算校验失败 scene={} attempt={} reason={}", current.id(), attempt + 1, issue);
-            if (attempt == 1) throw invalid();
+            log.warn("里程碑结算校验失败 milestone={} attempt={} reason={}", current.id(), attempt + 1, issue);
+            if (attempt == 1) throw invalid("剧情结算");
             beat = agent.advance(story, advanceContext
-                    + "\n上一版候选未通过校验，尚未保存，也不属于已经发生的历史。保持同一玩家选择，修正以下问题，返回完整结算结果。"
+                    + "\n上一版候选尚未保存，不是已发生的历史。保留玩家决定，按校验问题修正并返回完整结果。"
                     + "\n校验问题：" + issue + "\n上一版候选：\n" + beat);
         }
-        Plan target = beat.sceneEnded() && next != null ? next : currentPlan;
-        boolean terminal = beat.sceneEnded() && next == null;
+        Outline updatedOutline = outline;
+        Revision revision = null;
+        if (beat.milestoneEnded()) {
+            Set<String> completedIds = revisions.stream().map(Revision::milestoneId).collect(Collectors.toSet());
+            completedIds.add(current.id());
+            String revisionContext = "上一版完整预案：\n" + outlineContext(outline)
+                    + "\n此前已经完成的里程碑记录（不可改写）：\n" + revisions.stream().map(item ->
+                        item.milestoneId() + "：" + item.outcome() + "；实际影响：" + item.impact())
+                        .collect(Collectors.joining("\n"))
+                    + "\n本幕：" + current.id() + " / " + current.title()
+                    + "\n本幕实际结果：" + beat.outcome() + "\n本幕实际影响与未完成事项：" + beat.impact()
+                    + "\n结算后实际环境：" + beat.environment()
+                    + "\n当前仍可参与互动的角色 ID：" + beat.presentCharacterIds()
+                    + "\n全局是否已由实际事件结束：" + beat.storyEnded() + "\n结束依据：" + beat.endingReason()
+                    + "\n已完成 ID（不能重新使用）：" + completedIds
+                    + "\n未来里程碑可使用的角色 ID：" + allowedActors
+                    + "\n已保存经历及本轮决定：\n" + history + "\n本轮最终演绎：\n" + beat.narration();
+            var candidate = agent.reviseOutline(story, revisionContext);
+            for (int attempt = 0; ; attempt++) {
+                String issue = outlineIssue(candidate, allowedActors, completedIds,
+                        beat.presentCharacterIds(), beat.storyEnded());
+                if (issue.isEmpty()) break;
+                log.warn("大纲修订校验失败 milestone={} attempt={} reason={}", current.id(), attempt + 1, issue);
+                if (attempt == 1) throw invalid("后续大纲修订");
+                candidate = agent.reviseOutline(story, revisionContext
+                        + "\n上版修订尚未保存。校验问题：" + issue + "\n上版候选：\n" + candidate);
+            }
+            updatedOutline = copy(candidate);
+            revision = new Revision(revisions.size() + 1, current.id(), current.title(),
+                    number - current.turns(), number, beat.outcome().trim(), beat.impact().trim(), updatedOutline);
+        }
+        Plan target = beat.milestoneEnded() && !beat.storyEnded() ? updatedOutline.milestones().get(0) : currentPlan;
         State updated = new State(target.id(), target.title(), beat.environment().trim(),
-                List.copyOf(beat.presentCharacterIds()), target == currentPlan ? current.turns() + 1 : 0, terminal);
-        return new Resolution(updated, beat.narration().trim(), beat.sceneEnded(),
+                List.copyOf(beat.presentCharacterIds()), target == currentPlan ? current.turns() + 1 : 0, beat.storyEnded());
+        return new Resolution(updated, beat.narration().trim(), beat.milestoneEnded(),
                 beat.memories().entrySet().stream().collect(Collectors.toUnmodifiableMap(
-                        Map.Entry::getKey, entry -> entry.getValue().trim())));
+                        Map.Entry::getKey, entry -> entry.getValue().trim())), updatedOutline, revision);
     }
 
-    private String invalidReason(CharacterAgent.StoryBeat beat, State current, Plan next, boolean atLimit) {
+    private String beatIssue(CharacterAgent.StoryBeat beat, State current, Plan plan) {
         if (beat == null) return "没有返回结算对象。";
-        if (atLimit && !beat.sceneEnded()) {
-            return "本幕已达到上限，sceneEnded 必须为 true，targetSceneId 必须为 "
-                    + (next == null ? current.id() : next.id()) + "。";
-        }
-        Plan target = beat.sceneEnded() && next != null ? next : plan(current.id());
-        if (!target.id().equals(beat.targetSceneId())) {
-            return "targetSceneId 应为 " + target.id() + "，实际为 " + beat.targetSceneId() + "。";
-        }
-        if (!optionalText(beat.narration(), 1800)) return "narration 必须是最多 1800 字的字符串。";
+        if (!optionalText(beat.narration(), 2400)) return "narration 必须是最多 2400 字的字符串。";
         if (!text(beat.environment(), 1200)) return "environment 必须是 1 至 1200 字的字符串。";
-        if (!validParticipants(beat.presentCharacterIds(), new HashSet<>(target.characterIds()))) {
-            return "presentCharacterIds 只能从 " + target.characterIds() + " 中选择且不能重复，实际为 "
-                    + beat.presentCharacterIds() + "。";
+        if (!validParticipants(beat.presentCharacterIds(), new HashSet<>(plan.characterIds()))) {
+            return "presentCharacterIds 只能从本幕的 " + plan.characterIds() + " 中选择且不能重复。";
         }
         if (beat.memories() == null
                 || !beat.memories().keySet().equals(new HashSet<>(current.presentCharacterIds()))) {
-            return "memories 的键必须恰好为推进前的 " + current.presentCharacterIds()
+            return "memories 的键必须恰好为 " + current.presentCharacterIds()
                     + "，实际为 " + (beat.memories() == null ? "null" : beat.memories().keySet())
-                    + "；推进前无人时返回 {}，新入场者不在本轮记忆更新中。";
+                    + "；推进前无人时返回 {}，新入场者不在本轮更新中。";
         }
         if (beat.memories().values().stream().anyMatch(value -> !text(value, 1600))) {
             return "每份角色记忆必须是 1 至 1600 字的字符串。";
         }
-        if ((beat.sceneEnded() || !new HashSet<>(beat.presentCharacterIds()).equals(new HashSet<>(current.presentCharacterIds())))
+        if (beat.milestoneEnded() && (!text(beat.outcome(), 1200) || !text(beat.impact(), 1200))) {
+            return "里程碑结束时，outcome 和 impact 必须记录实际结果、决定的影响及未完成事项。";
+        }
+        if (beat.storyEnded() && (!beat.milestoneEnded() || !text(beat.endingReason(), 1200))) {
+            return "全局结束时必须同时结束里程碑，并在 endingReason 给出本局实际成立的终局依据。";
+        }
+        if ((beat.milestoneEnded() || !new HashSet<>(beat.presentCharacterIds()).equals(new HashSet<>(current.presentCharacterIds())))
                 && beat.narration().isBlank()) {
-            return "转场或参与名单改变时，narration 必须交代实际经过，不能为空。";
+            return "里程碑结束或参与名单改变时，narration 必须交代实际经过。";
         }
         return "";
     }
 
-    private Plan plan(String id) {
-        return plans.stream().filter(plan -> plan.id().equals(id)).findFirst().orElseThrow();
+    private static String outlineIssue(Outline outline, Set<String> actors, Set<String> completed,
+                                       List<String> present, boolean ended) {
+        if (outline == null || !text(outline.development(), 2400) || !text(outline.endingDirection(), 2400)
+                || outline.milestones() == null || outline.milestones().size() > 20) {
+            return "需要 development、endingDirection 与 milestones；文字各不超过 2400 字，一次修订最多 20 个待处理里程碑。";
+        }
+        if (ended != outline.milestones().isEmpty()) {
+            return ended ? "全局已经结束，milestones 必须为空，不再规划未发生的行动。"
+                    : "全局尚未结束，至少保留一个待处理里程碑，不能仅因旧计划用完就结束故事。";
+        }
+        Set<String> ids = new HashSet<>();
+        for (Plan plan : outline.milestones()) {
+            if (plan == null || plan.id() == null || !plan.id().matches("[a-zA-Z0-9-]{1,64}")
+                    || !text(plan.title(), 100) || !text(plan.environment(), 1200)
+                    || !text(plan.goal(), 1200) || !text(plan.exitCondition(), 1200)
+                    || !validParticipants(plan.characterIds(), actors)) {
+                return "每个里程碑需要有效且唯一的 id、title、environment、goal、exitCondition 和允许的 characterIds。";
+            }
+            if (completed.contains(plan.id()) || !ids.add(plan.id())) return "不能重复 ID 或重开已完成的里程碑：" + plan.id();
+        }
+        if (!ended && !outline.milestones().get(0).characterIds().containsAll(present)) {
+            return "下一里程碑须允许当前仍在互动的 " + present + "，不能在改大纲时悄悄移除角色。";
+        }
+        return "";
+    }
+
+    private static Outline copy(Outline outline) {
+        return new Outline(outline.development().trim(), outline.endingDirection().trim(),
+                outline.milestones().stream().map(plan -> new Plan(plan.id(), plan.title().trim(),
+                        plan.environment().trim(), List.copyOf(plan.characterIds()), plan.goal().trim(),
+                        plan.exitCondition().trim())).toList());
+    }
+
+    private Plan currentPlan(State state, Outline outline) {
+        if (outline.milestones().isEmpty() || !outline.milestones().get(0).id().equals(state.id())) {
+            throw new IllegalStateException("当前里程碑与本局大纲不一致");
+        }
+        return outline.milestones().get(0);
     }
 
     private String participants(List<String> ids) {
-        return ids.isEmpty() ? "只有玩家" : ids.stream().map(id -> names.get(id) + "（" + id + "）")
+        return ids.isEmpty() ? "无" : ids.stream().map(id -> names.get(id) + "（" + id + "）")
                 .collect(Collectors.joining("、"));
     }
 
@@ -163,14 +221,18 @@ public class SceneEngine {
         return value != null && value.length() <= limit;
     }
 
-    private ResponseStatusException invalid() {
+    private ResponseStatusException invalid(String stage) {
         return new ResponseStatusException(HttpStatus.BAD_GATEWAY,
-                "剧情生成未通过场景检查，自动修正仍未成功。本轮未保存，可以重试同一选项。");
+                stage + "未通过检查，自动修正仍未成功。本轮未保存，可以重试同一选项。");
     }
 
     public record Plan(String id, String title, String environment, List<String> characterIds,
-                       String goal, String exitCondition, int maxTurns) {}
+                       String goal, String exitCondition) {}
+    public record Outline(String development, String endingDirection, List<Plan> milestones) {}
+    public record Revision(int number, String milestoneId, String milestoneTitle, int firstTurn, int lastTurn,
+                           String outcome, String impact, Outline plan) {}
     public record State(String id, String title, String environment, List<String> presentCharacterIds,
                         int turns, boolean ended) {}
-    public record Resolution(State scene, String narration, boolean sceneEnded, Map<String, String> memories) {}
+    public record Resolution(State scene, String narration, boolean milestoneEnded, Map<String, String> memories,
+                             Outline outline, Revision revision) {}
 }

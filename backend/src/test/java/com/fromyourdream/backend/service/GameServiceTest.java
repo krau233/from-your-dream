@@ -66,17 +66,26 @@ class GameServiceTest {
                     new CharacterAgent.Choice("perform", "承担登台责任", "我会登台完成已经选定的方案。", "承担不完美演出的风险。"),
                     new CharacterAgent.Choice("withdraw", "承担撤下演出的责任", "我会说明撤下曲目的决定。", "放弃最后一次合演的机会。")));
         when(agent.prepareDecision(anyString(), anyString())).thenReturn(decision);
-        games = new GameService(accounts, agent, fixtureStory(decision));
+        var story = fixtureStory(decision);
+        when(agent.reviseOutline(anyString(), anyString())).thenAnswer(call -> {
+            String context = call.getArgument(1);
+            var plans = story.outline().milestones();
+            int index = 0;
+            while (!context.contains("本幕：" + plans.get(index).id() + " /")) index++;
+            return new SceneEngine.Outline("继续已经选定的演出安排。", "按实际演出结果收束。",
+                    context.contains("全局是否已由实际事件结束：true") ? List.of() : plans.subList(index + 1, plans.size()));
+        });
+        games = new GameService(accounts, agent, story);
     }
 
     private GameService.Story fixtureStory(CharacterAgent.DecisionPoint decision) {
         return new GameService.Story("最后一场演出", "音乐教室里，你们正准备最后一次排练。",
                 new GameService.OpeningPrompt("xu-zhi", "最后一遍，一起把歌唱完。", List.of()),
-                "林澈和许栀与你一起准备最后一场演出。", 8,
-                List.of(
-                    new SceneEngine.Plan("rehearsal", "音乐教室", "排练中。", BOTH, "决定结尾方案。", "方案落实或时间用尽。", 3),
-                    new SceneEngine.Plan("backstage", "礼堂侧幕", "候场中。", BOTH, "决定登台安排。", "安排确定或开演时间到。", 3),
-                    new SceneEngine.Plan("performance", "礼堂", "演出时刻。", BOTH, "呈现演出结果。", "主要行动结束。", 2)),
+                "林澈和许栀与你一起准备最后一场演出。",
+                new SceneEngine.Outline("排练、候场、演出依实际进展推进。", "演出结果及人物关系按实际行动收束。", List.of(
+                    new SceneEngine.Plan("rehearsal", "音乐教室", "排练中。", BOTH, "决定结尾方案。", "结尾方案已经实际落实。"),
+                    new SceneEngine.Plan("backstage", "礼堂侧幕", "候场中。", BOTH, "决定登台安排。", "登台安排已经确定。"),
+                    new SceneEngine.Plan("performance", "礼堂", "演出时刻。", BOTH, "呈现演出结果。", "主要行动结束。"))),
                 List.of(
                     new GameService.CharacterProfile("lin-che", "林澈", "负责作曲。", "你叫林澈，表达克制，认真看待承诺。"),
                     new GameService.CharacterProfile("xu-zhi", "许栀", "负责主唱。", "你叫许栀，坦率、独立，有自己的主意。")),
@@ -285,7 +294,7 @@ class GameServiceTest {
     }
 
     @Test
-    void outlineTransitionsAndTerminalSceneCanFinishBeforeGlobalLimit() {
+    void milestoneResultsReviseTheOutlineAndActualEndingClosesGame() {
         when(agent.advance(anyString(), anyString())).thenReturn(
                 move("backstage"), move("performance"), finish());
         when(agent.conclude(anyString(), anyString())).thenReturn("演出结束，你们把谱子留了下来。");
@@ -377,11 +386,11 @@ class GameServiceTest {
         var local = new CharacterAgent(ChatClient.create(model));
         assertEquals("", local.respond("林澈", "许栀与玩家在场", "你好").dialogue());
         ChatModel narrator = prompt -> new ChatResponse(List.of(new Generation(new AssistantMessage("""
-                {"narration":"排练结束，大家走到侧幕。","environment":"候场中。","presentCharacterIds":["lin-che","xu-zhi"],"memories":{"lin-che":"已练完结尾。","xu-zhi":"已练完结尾。"},"sceneEnded":true,"targetSceneId":"backstage"}
+                {"narration":"排练结束，大家走到侧幕。","environment":"候场中。","presentCharacterIds":["lin-che","xu-zhi"],"memories":{"lin-che":"已练完结尾。","xu-zhi":"已练完结尾。"},"milestoneEnded":true,"outcome":"已练完结尾。","impact":"可以继续候场。","storyEnded":false,"endingReason":""}
                 """))));
         var beat = new CharacterAgent(ChatClient.create(narrator)).advance("最后一场演出", "排练已完成");
-        assertTrue(beat.sceneEnded());
-        assertEquals("backstage", beat.targetSceneId());
+        assertTrue(beat.milestoneEnded());
+        assertEquals("已练完结尾。", beat.outcome());
         assertEquals(BOTH, beat.presentCharacterIds());
         assertEquals("已练完结尾。", beat.memories().get("xu-zhi"));
         ChatModel planner = prompt -> new ChatResponse(List.of(new Generation(new AssistantMessage("{\"speakerIds\":[]}"))));
@@ -447,12 +456,14 @@ class GameServiceTest {
     }
 
     private CharacterAgent.StoryBeat finish() {
-        return beat("performance", true, BOTH, MEMORIES, "最后一个音落下，演出已经结束。");
+        return new CharacterAgent.StoryBeat("最后一个音落下，演出已经结束。", "演出已结束。", BOTH,
+                MEMORIES, true, "演出已经实际结束。", "保留本局决定的关系与未完成约定。", true, "演出与主要行动已落定。");
     }
 
     private CharacterAgent.StoryBeat beat(String id, boolean ended, List<String> present,
                                           Map<String, String> memories, String narration) {
-        return new CharacterAgent.StoryBeat(narration, "当前准备进度与在场者保持可观察的一致。", present, memories, ended, id);
+        return new CharacterAgent.StoryBeat(narration, "当前准备进度与在场者保持可观察的一致。", present, memories,
+                ended, ended ? "本幕核心行动已有实际结果。" : "", ended ? "结果影响后续演出安排。" : "", false, "");
     }
 
     private String contextFor(String name, String input) {
